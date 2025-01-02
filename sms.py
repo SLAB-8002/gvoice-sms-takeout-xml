@@ -1,17 +1,18 @@
-import dateutil.parser
 import glob
 import os
-import phonenumbers
 import re
 import time
-from datetime import datetime, timedelta
 from base64 import b64encode
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from io import open  # adds emoji support
 from pathlib import Path
 from shutil import copyfileobj, move
 from tempfile import NamedTemporaryFile
 from time import strftime
+
+import dateutil.parser
+import phonenumbers
+from bs4 import BeautifulSoup
 
 sms_backup_filename = "./gvoice-all.xml"
 sms_backup_path = Path(sms_backup_filename)
@@ -299,7 +300,7 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
         if images:
             text_only = 0
             for image in images:
-                supported_types = ["jpg", "jpeg", "png", "gif"]
+                supported_types = IMAGE_EXTENSIONS
                 image_src = image["src"]
                 image_path = find_file_path(image_src, src_filename_map, file, supported_types)
                 image_type = image_path.suffix[1:]
