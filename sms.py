@@ -1,23 +1,42 @@
-import dateutil.parser
 import glob
 import os
-import phonenumbers
 import re
 import time
-from datetime import datetime, timedelta
 from base64 import b64encode
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from io import open  # adds emoji support
 from pathlib import Path
 from shutil import copyfileobj, move
 from tempfile import NamedTemporaryFile
 from time import strftime
 
+import dateutil.parser
+import isodate
+import phonenumbers
+from bs4 import BeautifulSoup
+
 sms_backup_filename = "./gvoice-all.xml"
 sms_backup_path = Path(sms_backup_filename)
 # Clear file if it already exists
 sms_backup_path.open("w").close()
-print("New file will be saved to " + sms_backup_filename)
+print("New SMS file will be saved to " + sms_backup_filename)
+
+call_log_filename = "./gvoice-calls.xml"
+call_log_path = Path(call_log_filename)
+# Clear file if it already exists
+call_log_path.open("w").close()
+print("New call log file will be saved to " + call_log_filename)
+
+
+CALL_TAG_TO_TYPE = {
+    'Received': 1,
+    'Placed': 2,
+    'Missed': 3,
+    'Voicemail': 4,
+    # 'Rejected': 5,  # Not found in GV
+    'Spam': 6,
+    'Recorded': None # does not map
+}
 
 def main():
     start_time=datetime.now()
@@ -27,6 +46,7 @@ def main():
     num_sms = 0
     num_img = 0
     num_vcf = 0
+    num_calls = 0
     root_dir = "."
     own_number = None
 
@@ -60,21 +80,30 @@ def main():
                 if a_tag:
                     own_number = a_tag.get('href').split(':', 1)[-1]  # Extracting number from href
                     break
-            # Skip files with no messages
-            if not len(messages_raw):
-                continue
 
             num_sms += len(messages_raw)
 
-            if is_group_conversation:
-                participants_raw = soup.find_all(class_="participants")
-                write_mms_messages(file, participants_raw, messages_raw, own_number, src_filename_map)
-            else:
-                write_sms_messages(file, messages_raw, own_number, src_filename_map)
+            if len(messages_raw):
+                if is_group_conversation:
+                    participants_raw = soup.find_all(class_="participants")
+                    write_mms_messages(file, participants_raw, messages_raw, own_number, src_filename_map)
+                else:
+                    write_sms_messages(file, messages_raw, own_number, src_filename_map)
+
+            call_raw = soup.find(class_="haudio")
+            if call_raw:
+                write_call(call_raw, call_log_filename)
+                num_calls += 1
+            
+
+
 
     sms_backup_file = open(sms_backup_filename, "a")
     sms_backup_file.write("</smses>")
     sms_backup_file.close()
+    call_log_file = open(call_log_filename, "a")
+    call_log_file.write("</calls>")
+    call_log_file.close()
     end_time=datetime.now()
     elapsed_time = end_time - start_time
     total_seconds = int(elapsed_time.total_seconds())
@@ -90,7 +119,8 @@ def main():
         parts.append(f"{seconds} seconds")
     time_str = ", ".join(parts)
     print(f"Processed {num_sms} messages, {num_img} images, and {num_vcf} contact cards in {time_str}")    
-    write_header(sms_backup_filename, num_sms)
+    write_sms_header(sms_backup_filename, num_sms)
+    write_calls_header(call_log_filename, num_calls)
 
 def remove_problematic_files():
     #Get user confimration before deleteing files
@@ -435,6 +465,24 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
 
     sms_backup_file.close()
 
+
+def write_call(call_raw, call_log_filename):
+    number = call_raw.find('a', class_='tel').get('href').split(':', 1)[-1]
+    date = get_time_unix_call(call_raw)
+    duration_element = call_raw.find(class_='duration')
+    duration_raw = duration_element['title'] if duration_element else "PT0S"
+    duration = round(isodate.parse_duration(duration_raw).total_seconds())
+    call_type = get_call_type(call_raw)
+    if call_type is None:
+        return
+    if not number:
+        return
+    with open(call_log_filename, "a", encoding="utf8") as call_log_file:
+        call_text = (
+            f'<call number="{number}" date="{date}" duration="{duration}" type="{call_type}" presentation="1" /> \n'
+        )
+        call_log_file.write(call_text)
+
 def get_message_type(message):  # author_raw = messages_raw[i].cite
     author_raw = message.cite
     if not author_raw.span:
@@ -443,6 +491,18 @@ def get_message_type(message):  # author_raw = messages_raw[i].cite
         return 1
 
     return 0
+
+def get_call_type(call_raw):
+    tag_elements = call_raw.find_all('a', rel='tag')
+    for tag in tag_elements:
+        tag_text = tag.get_text(strip=True)
+        if tag_text in CALL_TAG_TO_TYPE:
+            return CALL_TAG_TO_TYPE[tag_text]
+        
+    
+    print("Tags found: ", [tag.get_text(strip=True) for tag in tag_elements])
+
+    assert False, "Could not determine call type"
 
 def get_message_text(message):
     # Attempt to properly translate newlines. Might want to translate other HTML here, too.
@@ -532,14 +592,34 @@ def get_time_unix(message):
     # Changed this line to get the full date value including milliseconds.
     mstime = time.mktime(time_obj.timetuple()) * 1000 + time_obj.microsecond // 1000
     return int(mstime)
+    
+def get_time_unix_call(call_raw):
+    time_raw = call_raw.find(class_="published")
+    ymdhms = time_raw["title"]
+    time_obj = dateutil.parser.isoparse(ymdhms)
+    # Changed this line to get the full date value including milliseconds.
+    mstime = time.mktime(time_obj.timetuple()) * 1000 + time_obj.microsecond // 1000
+    return int(mstime)
 
 
-def write_header(filename, numsms):
+
+def write_sms_header(filename, numsms):
     # Prepend header in memory efficient manner since the output file can be huge
     with NamedTemporaryFile(dir=Path.cwd(), delete=False) as backup_temp:
         backup_temp.write(b"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n")
         backup_temp.write(b"<!--Converted from GV Takeout data -->\n")
         backup_temp.write(bytes(f'<smses count="{str(numsms)}">\n', encoding="utf8"))
+        with open(filename, "rb") as backup_file:
+            copyfileobj(backup_file, backup_temp)
+    # Overwrite output file with temp file
+    move(backup_temp.name, filename)
+
+def write_calls_header(filename, numcalls):
+    # Prepend header in memory efficient manner since the output file can be huge
+    with NamedTemporaryFile(dir=Path.cwd(), delete=False) as backup_temp:
+        backup_temp.write(b"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n")
+        backup_temp.write(b"<!--Converted from GV Takeout data -->\n")
+        backup_temp.write(bytes(f'<calls count="{str(numcalls)}">\n', encoding="utf8"))
         with open(filename, "rb") as backup_file:
             copyfileobj(backup_file, backup_temp)
     # Overwrite output file with temp file
